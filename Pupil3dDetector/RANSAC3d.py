@@ -1,4 +1,3 @@
-from threading import Thread
 import cv2
 import numpy as np
 from pye3dcustom.detector_3d import CameraModel, Detector3D, DetectorMode
@@ -8,6 +7,9 @@ import win32ui
 from ctypes import windll
 from PIL import Image
 import numpy
+
+import zmq
+import msgpack as serializer
 
 width = 320
 height = 240
@@ -198,9 +200,12 @@ update_eye_windows()
 frame_number = 0
 
 camera = CameraModel(focal_length=current_focal, resolution=[height, width])
-
 detector_3d = Detector3D(camera=camera, long_term_mode=DetectorMode.blocking)
 
+# setup zmq to send pupil data over network
+context = zmq.Context()
+socket = context.socket(zmq.PUB)
+socket.bind("tcp://*:50020")
 
 while True:
     update_eye_windows()
@@ -228,6 +233,19 @@ while True:
     extraImage, contours, hierarchy = cv2.findContours(
         image, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
     )
+    
+    # Remove all contours touching the edge of the image
+    badContours = np.ones(image.shape[:2], dtype="uint8") * 255
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if x == 0 or y == 0 or x+w == width or y+h == height:
+            cv2.drawContours(badContours, [contour], -1, 0, cv2.FILLED)
+    image = cv2.bitwise_and(image, image, mask=badContours)
+
+    extraImage, contours, hierarchy = cv2.findContours(
+        image, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
+    )
+    
     hull = []
     for i in range(len(contours)):
         hull.append(cv2.convexHull(contours[i], False))
@@ -248,6 +266,11 @@ while True:
         result_2d_final["timestamp"] = frame_number / fps
         result_3d = detector_3d.update_and_detect(result_2d_final, image_gray)
         ellipse_3d = result_3d["ellipse"]
+        
+        # serialize and send the pupil data
+        serialized = serializer.packb(result_3d, use_bin_type=True)
+        socket.send_string("pupil", flags=zmq.SNDMORE)
+        socket.send(serialized)
         
         # draw pupil
         cv2.ellipse(
