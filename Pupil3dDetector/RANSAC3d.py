@@ -1,3 +1,4 @@
+from math import atan2, sqrt, pi
 import cv2
 import numpy as np
 from pye3dcustom.detector_3d import CameraModel, Detector3D, DetectorMode
@@ -181,22 +182,49 @@ def fit_rotated_ellipse(data):
 
 focal_slider_max = 100
 current_focal = 0
+rotation_slider_max = 360
+rotZ = 0
+threshold_slider_max = 255
+current_threshold = 0
+opening_slider_max = 100
+current_opening = 0
 title_window = "Ransac"
 def on_trackbar(val):
     global current_focal
     current_focal = val
     return CameraModel(focal_length=val, resolution=[height, width])
 
+def on_trackbarRotZ(val):
+    global rotZ
+    rotZ = (val - 90) * pi / 180
+    
+def on_trackbarThreshold(val):
+    global current_threshold
+    current_threshold = 1 + val
+    
+def on_trackbarOpening(val):
+    global current_opening
+    current_opening = 1 + val
+
 cv2.namedWindow("Ransac")
 trackbar_name = 'Focal %d' % focal_slider_max
 cv2.createTrackbar(trackbar_name, title_window , 60, focal_slider_max, on_trackbar)
 
-# cap = cv2.VideoCapture("index.mp4")  # change this to the video you want to test
+trackbar_nameRotZ = 'Rotation Z'
+cv2.createTrackbar(trackbar_nameRotZ, title_window , 180, rotation_slider_max, on_trackbarRotZ)
+
+trackbar_nameThreshold = 'Threshold'
+cv2.createTrackbar(trackbar_nameThreshold, title_window , 70, threshold_slider_max, on_trackbarThreshold)
+
+trackbar_nameOpening = 'Opening'
+cv2.createTrackbar(trackbar_nameOpening, title_window , 30, opening_slider_max, on_trackbarOpening)
+
+cap = cv2.VideoCapture("index.mp4")  # change this to the video you want to test
 result_2d = {}
 result_2d_final = {}
 
-hook_eye_windows()
-update_eye_windows()
+# hook_eye_windows()
+# update_eye_windows()
 frame_number = 0
 
 camera = CameraModel(focal_length=current_focal, resolution=[height, width])
@@ -207,29 +235,38 @@ context = zmq.Context()
 socket = context.socket(zmq.PUB)
 socket.bind("tcp://*:50020")
 
-while True:
-    update_eye_windows()
-    img = left_eye
+play = True
+
+# while True:
+while cap.isOpened():
+    # update_eye_windows()
+    # img = left_eye
+    ret, img = cap.read()
+    if not ret:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        continue
     
     frame_number += 1
     newImage2 = img.copy()
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (current_opening, current_opening))
     image_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     ret, thresh = cv2.threshold(
-        image_gray, 70, 255, cv2.THRESH_BINARY
+        image_gray, current_threshold, 255, cv2.THRESH_BINARY
     )  # this will need to be adjusted everytime hardwere is changed (brightness of IR, Camera postion, etc)
     
     # erosion 
-    erosion_size = 5
-    erosion_shape = cv2.MORPH_ELLIPSE
-    element = cv2.getStructuringElement(erosion_shape, (2 * erosion_size + 1, 2 * erosion_size + 1),
-                                (erosion_size, erosion_size))
-    erosion = cv2.erode(thresh, element)
-    cv2.imshow("erode", erosion)
+    # erosion_size = 5
+    # erosion_shape = cv2.MORPH_ELLIPSE
+    # element = cv2.getStructuringElement(erosion_shape, (2 * erosion_size + 1, 2 * erosion_size + 1),
+    #                             (erosion_size, erosion_size))
+    # erosion = cv2.erode(thresh, element)
+    # cv2.imshow("erode", erosion)
     
-    opening = cv2.morphologyEx(erosion, cv2.MORPH_OPEN, kernel)
-    closing = cv2.morphologyEx(erosion, cv2.MORPH_CLOSE, kernel)
-    image = 255 - closing
+    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+    cv2.imshow("opening", opening)
+    # closing = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    # cv2.imshow("closing", closing)
+    image = 255 - opening
     extraImage, contours, hierarchy = cv2.findContours(
         image, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
     )
@@ -267,11 +304,6 @@ while True:
         result_3d = detector_3d.update_and_detect(result_2d_final, image_gray)
         ellipse_3d = result_3d["ellipse"]
         
-        # serialize and send the pupil data
-        serialized = serializer.packb(result_3d, use_bin_type=True)
-        socket.send_string("pupil", flags=zmq.SNDMORE)
-        socket.send(serialized)
-        
         # draw pupil
         cv2.ellipse(
             image_gray,
@@ -283,11 +315,74 @@ while True:
             (0, 255, 0),  # color (BGR): red
         )
         projected_sphere = result_3d["projected_sphere"]
-
-        print("sphere   ", tuple("{:8.5f}".format(v) for v in result_3d["sphere"]["center"]), "{:7.5f}".format(result_3d["sphere"]["radius"]))
-        print("circle_3d", tuple("{:8.5f}".format(v) for v in result_3d["circle_3d"]["center"]), "{:7.5f}".format(result_3d["circle_3d"]["radius"]))
-        # print("ellipse         ", tuple("{:9.5f}".format(v) for v in result_3d["ellipse"]["center"]), tuple("{:9.5f}".format(v) for v in result_3d["ellipse"]["axes"]), "{:7.5f}".format(result_3d["ellipse"]["angle"]))
-        # print("projected_sphere", tuple("{:9.5f}".format(v) for v in result_3d["projected_sphere"]["center"]), tuple("{:9.5f}".format(v) for v in result_3d["projected_sphere"]["axes"]), "{:7.5f}".format(result_3d["projected_sphere"]["angle"]))
+        
+        pupil_center = np.array(result_3d["circle_3d"]["center"])
+        eyeball_center = np.array(result_3d["sphere"]["center"])
+        
+        vector = eyeball_center - pupil_center
+        
+        rz = np.array(((np.cos(rotZ), -np.sin(rotZ), 0),
+                       (np.sin(rotZ), np.cos(rotZ), 0),
+                       (0, 0, 1)))
+        
+        # The rotation matrix to align the vector of the eye with the Z axis
+        rotate_forward = np.array(((0.99999811401, 0.00022015018, 0.00161572),
+                                    (0.00022015018, 0.96354532951, -0.267543),
+                                    (-0.00161572, 0.267543, 0.963544)))
+        
+        # Apply the forward rotation
+        vector_rotated = rotate_forward.dot(vector)
+        
+        vector_rotated = rz.dot(vector_rotated)
+        
+        scale_factor = 4
+        visualizers = np.ones((200, 330))
+        cv2.line(visualizers,
+            (50, 100),
+            (int(100 + vector_rotated[0] * scale_factor) , int(100 + vector_rotated[1] * scale_factor)),
+            (0, 255, 0),
+            4
+        )
+        
+        cv2.line(visualizers,
+            (120, 100),
+            (120, 100 + int(vector_rotated[2] * scale_factor)),
+            (0, 255, 0),
+            4
+        )
+        
+        # X and Z are swapped
+        yaw = atan2(vector_rotated[1], vector_rotated[2]) * 180 / pi
+        pitch = atan2(vector_rotated[0], sqrt(vector_rotated[2] * vector_rotated[2] + vector_rotated[1] * vector_rotated[1] + vector_rotated[0] * vector_rotated[0])) * 180 / pi
+        
+        scale_factor = 4
+        cv2.line(visualizers,
+            (240, 100),
+            (240 - int(scale_factor *yaw), 100 + int(scale_factor * pitch)),
+            (0, 255, 0),
+            4
+        )
+        cv2.circle(
+            visualizers,
+            (240, 100),
+            90,
+            (0, 255, 0)
+        )
+        
+        cv2.imshow("Visualizers", visualizers)
+        
+        print(pitch, " | ", yaw)
+      
+        # It seems like both axes range from -15 to 15 or so (could use additional tweaking)
+        pitch_scaling = 1/15
+        yaw_scaling = 1/15
+        
+        gaze_data = {"pitch": pitch * pitch_scaling, "yaw": yaw * yaw_scaling}
+        
+        # serialize and send the gaze data
+        serialized = serializer.packb(gaze_data, use_bin_type=True)
+        socket.send_string("custom_gaze", flags=zmq.SNDMORE)
+        socket.send(serialized)
         
         # draw eyeball
         cv2.ellipse(
