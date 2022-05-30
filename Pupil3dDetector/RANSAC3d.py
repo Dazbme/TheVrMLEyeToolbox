@@ -1,5 +1,6 @@
 from functools import partial
 from math import atan2, sqrt, pi
+from warnings import catch_warnings
 import cv2
 import numpy as np
 from pye3dcustom.detector_3d import CameraModel, Detector3D, DetectorMode
@@ -12,6 +13,43 @@ import numpy
 
 import zmq
 import msgpack as serializer
+import pickle
+
+params = dict()
+try:
+    with open("params.conf", 'rb') as file:
+        loadedParams = pickle.load(file)
+        params = {
+            'focal_dist': int(loadedParams['focal_dist']),
+            'rotaton_z_degrees': int(loadedParams['rotaton_z_degrees']),
+            'threshold': int(loadedParams['threshold']),
+            'opening': int(loadedParams['opening']),
+            'iterations': int(loadedParams['iterations']),
+            'samples': int(loadedParams['samples']),
+            'offset': int(loadedParams['offset']),
+            'lerp': int(loadedParams['lerp']),
+            'pitch_scale': int(loadedParams['pitch_scale']),
+            'yaw_scale': int(loadedParams['yaw_scale']),
+            'calibrate': int(loadedParams['calibrate']),
+            'forward_rotation_matrix': loadedParams['forward_rotation_matrix']
+        }
+except Exception as e:
+    params = {
+        'focal_dist': 60,
+        'rotaton_z_degrees': 180,
+        'threshold': 70,
+        'opening': 30,
+        'iterations': 20,
+        'samples': 10,
+        'offset': 80,
+        'lerp': 100,
+        'pitch_scale': 15,
+        'yaw_scale': 15,
+        'calibrate': 0,
+        'forward_rotation_matrix': np.array(((0.99999811401, 0.00022015018, 0.00161572),
+                                            (0.00022015018, 0.96354532951, -0.267543),
+                                            (-0.00161572, 0.267543, 0.963544)))
+    }
 
 width = 320
 height = 240
@@ -181,39 +219,31 @@ def fit_rotated_ellipse(data):
 
     return (cx, cy, w, h, theta)
 
-current_focal = 0
-rotZ = 0
-current_threshold = 0
-current_opening = 0
-ransacIter = 0
-ransacSample_num = 0
-ransacOffset = 0
-lerpFactor = 0
-pitchScale = 0
-yawScale = 0
 title_window = "Ransac"
 
-camera = CameraModel(focal_length=current_focal, resolution=[height, width])
+camera = CameraModel(focal_length=params['focal_dist'], resolution=[height, width])
 
 eye_vector = np.array((0, 0, 1))
-forward_rotation_matrix = np.array(((0.99999811401, 0.00022015018, 0.00161572),
-                                    (0.00022015018, 0.96354532951, -0.267543),
-                                    (-0.00161572, 0.267543, 0.963544)))
+rotZ = 0
 
 def on_trackbarFocal(val):
-    global current_focal, camera
-    current_focal = val
+    global params, camera
+    params['focal_dist'] = val
     camera = CameraModel(focal_length=val, resolution=[height, width])
 
 def on_trackbarRotZ(val):
-    global rotZ
+    global params, rotZ
+    params['rotaton_z_degrees'] = val
     rotZ = (val - 90) * pi / 180
     
-def on_trackbar(variable, val, offset = 1):
-    globals()[variable] = offset + val
+def on_trackbar(variable, val):
+    global params
+    if (val == 0):
+        val = 1
+    params[variable] = val
     
 def on_trackbar_calibrate(val):
-    global forward_rotation_matrix
+    global params
     forward_vector = np.array((0, 0, 1))
     
     eye_vector_length = sqrt(eye_vector[0] * eye_vector[0] + eye_vector[1] * eye_vector[1] + eye_vector[2] * eye_vector[2])
@@ -224,37 +254,29 @@ def on_trackbar_calibrate(val):
     cosA = eye_vector_normalized.dot(forward_vector)
     k = 1 / (1 + cosA)
     
-    forward_rotation_matrix = np.array((((axis[0] * axis[0] * k) + cosA, (axis[1] * axis[0] * k) - axis[2], (axis[2] * axis[0] * k) + axis[1]),
-                                        ((axis[0] * axis[1] * k) + axis[2], (axis[1] * axis[1] * k) + cosA, (axis[2] * axis[1] * k) - axis[0]), 
-                                        ((axis[0] * axis[2] * k) - axis[1], (axis[1] * axis[2] * k) + axis[1], (axis[2] * axis[2] * k) + cosA)))
-    
+    params['forward_rotation_matrix'] = np.array((((axis[0] * axis[0] * k) + cosA, (axis[1] * axis[0] * k) - axis[2], (axis[2] * axis[0] * k) + axis[1]),
+                                                ((axis[0] * axis[1] * k) + axis[2], (axis[1] * axis[1] * k) + cosA, (axis[2] * axis[1] * k) - axis[0]), 
+                                                ((axis[0] * axis[2] * k) - axis[1], (axis[1] * axis[2] * k) + axis[1], (axis[2] * axis[2] * k) + cosA)))
 
 cv2.namedWindow("Ransac")
-cv2.createTrackbar('Focal Dist', title_window , 60, 100, on_trackbarFocal)
-
-cv2.createTrackbar('Rotation Z', title_window , 180, 360, on_trackbarRotZ)
-
-cv2.createTrackbar('Threshold', title_window , 70, 255, partial(on_trackbar, 'current_threshold'))
-
-cv2.createTrackbar('Opening', title_window , 30, 100, partial(on_trackbar, 'current_opening'))
-
-cv2.createTrackbar('Iterations', title_window , 20, 160, partial(on_trackbar, 'ransacIter'))
-cv2.createTrackbar('Samples', title_window , 10, 20, partial(on_trackbar, 'ransacSample_num'))
-cv2.createTrackbar('Offset', title_window , 80, 160, partial(on_trackbar, 'ransacOffset'))
-
-cv2.createTrackbar('LERP', title_window , 100, 100, partial(on_trackbar, 'lerpFactor'))
-
-cv2.createTrackbar('Pitch Scale', title_window , 15, 90, partial(on_trackbar, 'pitchScale'))
-cv2.createTrackbar('Yaw Scale', title_window , 15, 90, partial(on_trackbar, 'yawScale'))
-
-cv2.createTrackbar('Calibrate', title_window , 0, 1, on_trackbar_calibrate)
+cv2.createTrackbar('Focal Dist', title_window , params['focal_dist'], 100, on_trackbarFocal)
+cv2.createTrackbar('Rotation Z', title_window , int(params['rotaton_z_degrees']), 360, on_trackbarRotZ)
+cv2.createTrackbar('Threshold', title_window , params['threshold'], 255, partial(on_trackbar, 'threshold'))
+cv2.createTrackbar('Opening', title_window , params['opening'], 100, partial(on_trackbar, 'opening'))
+cv2.createTrackbar('Iterations', title_window , params['iterations'], 160, partial(on_trackbar, 'iterations'))
+cv2.createTrackbar('Samples', title_window , params['samples'], 20, partial(on_trackbar, 'samples'))
+cv2.createTrackbar('Offset', title_window , params['offset'], 160, partial(on_trackbar, 'offset'))
+cv2.createTrackbar('LERP', title_window , params['lerp'], 100, partial(on_trackbar, 'lerp'))
+cv2.createTrackbar('Pitch Scale', title_window , params['pitch_scale'], 90, partial(on_trackbar, 'pitch_scale'))
+cv2.createTrackbar('Yaw Scale', title_window , params['yaw_scale'], 90, partial(on_trackbar, 'yaw_scale'))
+cv2.createTrackbar('Calibrate', title_window , params['calibrate'], 1, on_trackbar_calibrate)
 
 cap = cv2.VideoCapture("index.mp4")  # change this to the video you want to test
 result_2d = {}
 result_2d_final = {}
 
-hook_eye_windows()
-update_eye_windows()
+# hook_eye_windows()
+# update_eye_windows()
 frame_number = 0
 
 prevPitch = 0
@@ -271,19 +293,19 @@ play = True
 
 while True:
 # while cap.isOpened():
-    update_eye_windows()
-    img = left_eye
-    # ret, img = cap.read()
-    # if not ret:
-    #     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    #     continue
+    # update_eye_windows()
+    # img = left_eye
+    ret, img = cap.read()
+    if not ret:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        continue
     
     frame_number += 1
     newImage2 = img.copy()
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (current_opening, current_opening))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (params['opening'], params['opening']))
     image_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     ret, thresh = cv2.threshold(
-        image_gray, current_threshold, 255, cv2.THRESH_BINARY
+        image_gray, params['threshold'], 255, cv2.THRESH_BINARY
     )  # this will need to be adjusted everytime hardwere is changed (brightness of IR, Camera postion, etc)
     
     # erosion 
@@ -323,7 +345,7 @@ while True:
         cnt = sorted(hull, key=cv2.contourArea)
         maxcnt = cnt[-1]
         ellipse = cv2.fitEllipse(maxcnt)
-        cx, cy, w, h, theta = fit_rotated_ellipse_ransac(maxcnt.reshape(-1, 2), ransacIter, ransacSample_num, ransacOffset)
+        cx, cy, w, h, theta = fit_rotated_ellipse_ransac(maxcnt.reshape(-1, 2), params['iterations'], params['samples'], params['offset'])
         #get axis and angle of ellipse pupil labs 2d  
         result_2d["center"] = (cx, cy)
         result_2d["axes"] = (w, h) 
@@ -358,7 +380,7 @@ while True:
                        (0, 0, 1)))
         
         # Apply the forward rotation
-        vector_rotated = forward_rotation_matrix.dot(eye_vector)
+        vector_rotated = params['forward_rotation_matrix'].dot(eye_vector)
         
         vector_rotated = rz.dot(vector_rotated)
         
@@ -384,11 +406,11 @@ while True:
         
         # print(pitch, " | ", yaw)
         
-        pitch *= 1 / pitchScale
-        yaw *= 1 / yawScale
+        pitch *= 1 / params['pitch_scale']
+        yaw *= 1 / params['yaw_scale']
         
-        prevPitch += (pitch - prevPitch) * (lerpFactor / 100)
-        prevYaw += (yaw - prevYaw) * (lerpFactor / 100)
+        prevPitch += (pitch - prevPitch) * (params['lerp'] / 100)
+        prevYaw += (yaw - prevYaw) * (params['lerp'] / 100)
         
         cv2.line(visualizers,
             (240, 100),
@@ -441,4 +463,6 @@ while True:
     cv2.imshow("Ransac2", image_gray)
     cv2.imshow("Original", thresh)
     if cv2.waitKey(1) & 0xFF == ord("q"):
+        with open("params.conf", "wb") as file:
+            pickle.dump(params, file)
         break
