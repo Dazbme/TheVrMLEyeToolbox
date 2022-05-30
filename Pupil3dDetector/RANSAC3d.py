@@ -1,3 +1,4 @@
+from functools import partial
 from math import atan2, sqrt, pi
 import cv2
 import numpy as np
@@ -180,54 +181,85 @@ def fit_rotated_ellipse(data):
 
     return (cx, cy, w, h, theta)
 
-focal_slider_max = 100
 current_focal = 0
-rotation_slider_max = 360
 rotZ = 0
-threshold_slider_max = 255
 current_threshold = 0
-opening_slider_max = 100
 current_opening = 0
+ransacIter = 0
+ransacSample_num = 0
+ransacOffset = 0
+lerpFactor = 0
+pitchScale = 0
+yawScale = 0
 title_window = "Ransac"
-def on_trackbar(val):
-    global current_focal
+
+camera = CameraModel(focal_length=current_focal, resolution=[height, width])
+
+eye_vector = np.array((0, 0, 1))
+forward_rotation_matrix = np.array(((0.99999811401, 0.00022015018, 0.00161572),
+                                    (0.00022015018, 0.96354532951, -0.267543),
+                                    (-0.00161572, 0.267543, 0.963544)))
+
+def on_trackbarFocal(val):
+    global current_focal, camera
     current_focal = val
-    return CameraModel(focal_length=val, resolution=[height, width])
+    camera = CameraModel(focal_length=val, resolution=[height, width])
 
 def on_trackbarRotZ(val):
     global rotZ
     rotZ = (val - 90) * pi / 180
     
-def on_trackbarThreshold(val):
-    global current_threshold
-    current_threshold = 1 + val
+def on_trackbar(variable, val, offset = 1):
+    globals()[variable] = offset + val
     
-def on_trackbarOpening(val):
-    global current_opening
-    current_opening = 1 + val
+def on_trackbar_calibrate(val):
+    global forward_rotation_matrix
+    forward_vector = np.array((0, 0, 1))
+    
+    eye_vector_length = sqrt(eye_vector[0] * eye_vector[0] + eye_vector[1] * eye_vector[1] + eye_vector[2] * eye_vector[2])
+    eye_vector_normalized = np.array((eye_vector[0] / eye_vector_length, eye_vector[1] / eye_vector_length, eye_vector[2] / eye_vector_length))
+    
+    axis = np.cross(eye_vector_normalized, forward_vector)
+    
+    cosA = eye_vector_normalized.dot(forward_vector)
+    k = 1 / (1 + cosA)
+    
+    forward_rotation_matrix = np.array((((axis[0] * axis[0] * k) + cosA, (axis[1] * axis[0] * k) - axis[2], (axis[2] * axis[0] * k) + axis[1]),
+                                        ((axis[0] * axis[1] * k) + axis[2], (axis[1] * axis[1] * k) + cosA, (axis[2] * axis[1] * k) - axis[0]), 
+                                        ((axis[0] * axis[2] * k) - axis[1], (axis[1] * axis[2] * k) + axis[1], (axis[2] * axis[2] * k) + cosA)))
+    
 
 cv2.namedWindow("Ransac")
-trackbar_name = 'Focal %d' % focal_slider_max
-cv2.createTrackbar(trackbar_name, title_window , 60, focal_slider_max, on_trackbar)
+cv2.createTrackbar('Focal Dist', title_window , 60, 100, on_trackbarFocal)
 
-trackbar_nameRotZ = 'Rotation Z'
-cv2.createTrackbar(trackbar_nameRotZ, title_window , 180, rotation_slider_max, on_trackbarRotZ)
+cv2.createTrackbar('Rotation Z', title_window , 180, 360, on_trackbarRotZ)
 
-trackbar_nameThreshold = 'Threshold'
-cv2.createTrackbar(trackbar_nameThreshold, title_window , 70, threshold_slider_max, on_trackbarThreshold)
+cv2.createTrackbar('Threshold', title_window , 70, 255, partial(on_trackbar, 'current_threshold'))
 
-trackbar_nameOpening = 'Opening'
-cv2.createTrackbar(trackbar_nameOpening, title_window , 30, opening_slider_max, on_trackbarOpening)
+cv2.createTrackbar('Opening', title_window , 30, 100, partial(on_trackbar, 'current_opening'))
+
+cv2.createTrackbar('Iterations', title_window , 20, 160, partial(on_trackbar, 'ransacIter'))
+cv2.createTrackbar('Samples', title_window , 10, 20, partial(on_trackbar, 'ransacSample_num'))
+cv2.createTrackbar('Offset', title_window , 80, 160, partial(on_trackbar, 'ransacOffset'))
+
+cv2.createTrackbar('LERP', title_window , 100, 100, partial(on_trackbar, 'lerpFactor'))
+
+cv2.createTrackbar('Pitch Scale', title_window , 15, 90, partial(on_trackbar, 'pitchScale'))
+cv2.createTrackbar('Yaw Scale', title_window , 15, 90, partial(on_trackbar, 'yawScale'))
+
+cv2.createTrackbar('Calibrate', title_window , 0, 1, on_trackbar_calibrate)
 
 cap = cv2.VideoCapture("index.mp4")  # change this to the video you want to test
 result_2d = {}
 result_2d_final = {}
 
-# hook_eye_windows()
-# update_eye_windows()
+hook_eye_windows()
+update_eye_windows()
 frame_number = 0
 
-camera = CameraModel(focal_length=current_focal, resolution=[height, width])
+prevPitch = 0
+prevYaw = 0
+
 detector_3d = Detector3D(camera=camera, long_term_mode=DetectorMode.blocking)
 
 # setup zmq to send pupil data over network
@@ -237,14 +269,14 @@ socket.bind("tcp://*:50020")
 
 play = True
 
-# while True:
-while cap.isOpened():
-    # update_eye_windows()
-    # img = left_eye
-    ret, img = cap.read()
-    if not ret:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        continue
+while True:
+# while cap.isOpened():
+    update_eye_windows()
+    img = left_eye
+    # ret, img = cap.read()
+    # if not ret:
+    #     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    #     continue
     
     frame_number += 1
     newImage2 = img.copy()
@@ -291,7 +323,7 @@ while cap.isOpened():
         cnt = sorted(hull, key=cv2.contourArea)
         maxcnt = cnt[-1]
         ellipse = cv2.fitEllipse(maxcnt)
-        cx, cy, w, h, theta = fit_rotated_ellipse_ransac(maxcnt.reshape(-1, 2))
+        cx, cy, w, h, theta = fit_rotated_ellipse_ransac(maxcnt.reshape(-1, 2), ransacIter, ransacSample_num, ransacOffset)
         #get axis and angle of ellipse pupil labs 2d  
         result_2d["center"] = (cx, cy)
         result_2d["axes"] = (w, h) 
@@ -319,19 +351,14 @@ while cap.isOpened():
         pupil_center = np.array(result_3d["circle_3d"]["center"])
         eyeball_center = np.array(result_3d["sphere"]["center"])
         
-        vector = eyeball_center - pupil_center
+        eye_vector = eyeball_center - pupil_center
         
         rz = np.array(((np.cos(rotZ), -np.sin(rotZ), 0),
                        (np.sin(rotZ), np.cos(rotZ), 0),
                        (0, 0, 1)))
         
-        # The rotation matrix to align the vector of the eye with the Z axis
-        rotate_forward = np.array(((0.99999811401, 0.00022015018, 0.00161572),
-                                    (0.00022015018, 0.96354532951, -0.267543),
-                                    (-0.00161572, 0.267543, 0.963544)))
-        
         # Apply the forward rotation
-        vector_rotated = rotate_forward.dot(vector)
+        vector_rotated = forward_rotation_matrix.dot(eye_vector)
         
         vector_rotated = rz.dot(vector_rotated)
         
@@ -355,10 +382,17 @@ while cap.isOpened():
         yaw = atan2(vector_rotated[1], vector_rotated[2]) * 180 / pi
         pitch = atan2(vector_rotated[0], sqrt(vector_rotated[2] * vector_rotated[2] + vector_rotated[1] * vector_rotated[1] + vector_rotated[0] * vector_rotated[0])) * 180 / pi
         
-        scale_factor = 4
+        # print(pitch, " | ", yaw)
+        
+        pitch *= 1 / pitchScale
+        yaw *= 1 / yawScale
+        
+        prevPitch += (pitch - prevPitch) * (lerpFactor / 100)
+        prevYaw += (yaw - prevYaw) * (lerpFactor / 100)
+        
         cv2.line(visualizers,
             (240, 100),
-            (240 - int(scale_factor *yaw), 100 + int(scale_factor * pitch)),
+            (240 - int(90 *prevYaw), 100 + int(90 * prevPitch)),
             (0, 255, 0),
             4
         )
@@ -368,16 +402,9 @@ while cap.isOpened():
             90,
             (0, 255, 0)
         )
-        
         cv2.imshow("Visualizers", visualizers)
         
-        print(pitch, " | ", yaw)
-      
-        # It seems like both axes range from -15 to 15 or so (could use additional tweaking)
-        pitch_scaling = 1/15
-        yaw_scaling = 1/15
-        
-        gaze_data = {"pitch": pitch * pitch_scaling, "yaw": yaw * yaw_scaling}
+        gaze_data = {"pitch": prevPitch, "yaw": -prevYaw, "openness": float(1)}
         
         # serialize and send the gaze data
         serialized = serializer.packb(gaze_data, use_bin_type=True)
@@ -403,9 +430,15 @@ while cap.isOpened():
             (0, 255, 0),  # color (BGR): red
         )
     except:
+        # If tracking fails, assume the eye is closed
+        gaze_data = {"pitch": prevPitch, "yaw": -prevYaw, "openness": float(0)}
+        serialized = serializer.packb(gaze_data, use_bin_type=True)
+        socket.send_string("custom_gaze", flags=zmq.SNDMORE)
+        socket.send(serialized)
         pass
     
     cv2.imshow("Ransac", image_gray)
+    cv2.imshow("Ransac2", image_gray)
     cv2.imshow("Original", thresh)
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
